@@ -1,5 +1,6 @@
 offset_x: -50.0
 offset_y: -140.0
 zoom: 3.5
-resolution: 64
-tiling: 2
+resolution: 256
+tiling: -1
+tile_size: 32

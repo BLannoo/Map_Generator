@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Any
 import dataclasses
 from datetime import datetime
 from typing import List, Optional
@@ -10,11 +11,16 @@ from map_generator.landscape import landscape_gen
 from map_generator import backend_switch as np
 
 
+def from_dict_helper(cls, data : dict[str , Any]):
+    valid_field_names = [f.name for f in dataclasses.fields(cls)]
+    filtered_data = {k:v for k, v in data.items() if k in valid_field_names}
+    return cls(**filtered_data)
+
 @dataclass(frozen=True)
 class WorldParams:
     world_size: int  # Linear scale of the world in km
-    mountain_heights: float  # Height of mountains in km 0..1
-    river_scale: float  # Height of rivers in m / Dendry height (0..1000)
+    mountain_heights: float   # Height of mountains in km 0..1
+    river_scale: float   # Height of rivers in m / Dendry height (0..1000)
     centroids: Optional[List[List[float]]] = None  # plate centroids as relative [[x, y], ...] both x and y in 0..1
     heights_tectonic_plates: Optional[List[float]] = None  # list with values between [-1..1]
     slopes_x: Optional[List[float]] = None  # km across world size
@@ -24,10 +30,12 @@ class WorldParams:
     @staticmethod
     def from_yaml(path: str | Path) -> "WorldParams":
         data = yaml.safe_load(Path(path).read_text(encoding='utf-8'))
-        return WorldParams(**data)
+        return WorldParams.from_dict(data)
     @staticmethod
     def from_dict(data: dict) -> "WorldParams":
-        return WorldParams(**data)
+        return from_dict_helper(cls=WorldParams, data=data)
+        # filtered_data = {k:v for k, v in data.items() if k in [f.name for f in dataclasses.fields(WorldParams)]}
+        # return WorldParams(**filtered_data)
 
 
 @dataclass(frozen=True)
@@ -36,15 +44,17 @@ class ImagingParams:
     offset_y: float
     zoom: float  # Relative zoom, 1 = whole world without boundaries
     resolution: int  # resolution in each direction
-    tiling: int  # number of splits for memory management (2 means 2 tiles total)
+    tiling: int = -1 # number of splits for memory management (2 means 2 tiles total)
+    tile_size : int = 0 # resolution of each tile, to be used when rendering the image in chunks. If <1, generate the whole image at once
 
     @staticmethod
     def from_yaml(path: str | Path) -> "ImagingParams":
         data = yaml.safe_load(Path(path).read_text(encoding='utf-8'))
-        return ImagingParams(**data)
+        return ImagingParams.from_dict(data)
     @staticmethod
     def from_dict(data: dict) -> "ImagingParams":
-        return ImagingParams(**data)
+        return from_dict_helper(cls=ImagingParams, data=data)
+        # return ImagingParams(**data)
 
 def to_yaml(obj: WorldParams | ImagingParams, path: str | Path) -> None:
     payload = dataclasses.asdict(obj)
@@ -88,6 +98,18 @@ class RootParams:
         y += self.imaging.offset_y
 
         X, Y = np.meshgrid(x, y)
+        if self.imaging.tile_size > 0: # split the mesh grid into tiles of size tile_size x tile_size
+            num_tiles = self.imaging.resolution // self.imaging.tile_size # number of tiles in each axis
+            effective_res = num_tiles * self.imaging.tile_size
+            if effective_res != self.imaging.resolution:
+                print(f"Warning: resolution {self.imaging.resolution} is not a multiple of tile_size {self.imaging.tile_size}. Upsampling to {effective_res}.")
+                x = np.linspace(self.min_pos(), self.max_pos(), effective_res)
+                y = np.linspace(self.min_pos(), self.max_pos(), effective_res)
+                x += self.imaging.offset_x
+                y += self.imaging.offset_y
+                X, Y = np.meshgrid(x, y)
+            X = X.reshape((num_tiles, self.imaging.tile_size, num_tiles, self.imaging.tile_size)).swapaxes(1,2)
+            Y = Y.reshape((num_tiles, self.imaging.tile_size, num_tiles, self.imaging.tile_size)).swapaxes(1,2)
         return X, Y
 
     def save(self) -> None:

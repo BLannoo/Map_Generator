@@ -34,7 +34,7 @@ except:
 jax_available = False
 try:
     import jax
-    jax_available = False # True # Experimental feature, disabled for testing
+    jax_available =  True # Experimental feature, disabled for testing
 except:
     if debug:
         print("jax import failed. JAX will not be available.")

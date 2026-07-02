@@ -117,6 +117,10 @@ class landscape_gen():
         base_height += np.asarray(self.heights)[np.newaxis, :]
         base_height += np.multiply(distances, base_height) # multiplying in a separate step so that the slope contribution is also scaled
         base_height = np.sum(base_height, axis = -1)
+        base_height = base_height - np.sum(np.asarray(self.heights)) #For an unknown reason, there seems to be global influence of all plates, therefore this correction is needed
+        # TODO: identify why this global influence occurs and whether it can be mitigated in a more principled way
+
+        
         # This point in the process gives a very old, eroded landscape, similar to canyons or the Blue Mountains
         if include_secondary:
             #Secondary shape should result in a curve that dips negative, making negative plates cause a ridge on neighbours, mimicking subduction
