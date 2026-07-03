@@ -1,6 +1,8 @@
 # Map_Generator
  World Generator for use in gaming projects
 Generates heightfields for terrain maps. Heightfields are continuous and fully procedural. 
+A demo can be run on google colab at: https://colab.research.google.com/github/EddieMcT/Map_Generator/blob/main/Parallelised_world_demo.ipynb 
+
 
 Heightfields entirely made in parallel and all calculations should be vectorised. This means that every step in the calculations is fully deterministic, using ​basic arithmetic and a lot of fractal noise, with no simulations or random processes involved after setting initial parameters. Each point is calculated entirely independently of the others, and any number of maps can be made of a world at different zoom levels and locations without discontinuities.
 
