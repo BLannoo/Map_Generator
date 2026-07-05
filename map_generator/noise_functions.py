@@ -1,5 +1,6 @@
 from pathlib import Path
 import map_generator.backend_switch as np
+from map_generator.backend_switch import named_scope, scoped, fine_scope
 import math
 # from scipy.interpolate import CubicSpline
 import gc
@@ -10,6 +11,7 @@ from map_generator.globals import REPO_ROOT
 # Helper functions (to move to another file?)
 # =========================
 
+@scoped
 def generate_spline_points(x1, y1, x2, y2, n_points=10, delta=0.05, method = 'count', control_start_x = None, control_start_y = None, control_end_x = None, control_end_y = None):
     """
     Generate points along a spline between two points.
@@ -22,6 +24,7 @@ def generate_spline_points(x1, y1, x2, y2, n_points=10, delta=0.05, method = 'co
 
     return spline_x, spline_y
 
+@scoped
 def find_nearest_points(x, y, candidate_x, candidate_y):
     #Given query points (x, y) (of any shape) and a set of candidate points per query point (candidate_x, candidate_y),
     #returns nearest tree point coordinates and square distances.
@@ -37,30 +40,39 @@ def find_nearest_points(x, y, candidate_x, candidate_y):
 
     return nearest_idx, sq_distances**0.5
 
+@scoped
 def bezier_points(t, p0, p1, p2, p3):
     # For an array of input control points and an array of values of t, computes locations along cubic Bezier curve for each t value for each set of control points
     # Control points are assumed to be of the same (arbitrary) shape (e.g., 3D vectors), eg (a,b,..., n)
     # t is assumed to be one-dimensional array or list (e.g., np.linspace(0,1,num_points))
     # output is of shape (a,b,...,n,num_points) where n is the number of dimensions for each control point (e.g., 3 for 3D vectors)
-    t3 = np.power(t,3)
-    t2 = np.power(t,2)
-    t0 = np.ones_like(t)
-    return ((-p0 + 3*p1 - 3*p2 + p3)[..., np.newaxis]*t3
+    with named_scope("t_powers"):
+        t3 = np.power(t,3)
+        t2 = np.power(t,2)
+        t0 = np.ones_like(t)
+    with named_scope("cubic_polynomial"):
+        out = ((-p0 + 3*p1 - 3*p2 + p3)[..., np.newaxis]*t3
             + (p0 - 2*p1 + p2)[..., np.newaxis]*t2*3
             + (p1 -p0 )[..., np.newaxis] *t*3
             + p0[..., np.newaxis]*t0)
+    return out
+@scoped
 def bezier_tangents(t, p0, p1, p2, p3):
     # For an array of input control points and an array of values of t, computes directions along cubic Bezier curve for each t value for each set of control points
     # Control points are assumed to be of the same (arbitrary) shape (e.g., 3D vectors), eg (a,b,..., n)
     # t is assumed to be one-dimensional array or list (e.g., np.linspace(0,1,num_points))
     # output is of shape (a,b,...,n,num_points) where n is the number of dimensions for each control point (e.g., 3 for 3D vectors)
-    t2 = np.power(t,2)
-    t0 = np.ones_like(t)
-    return ((-p0 + 3*p1 - 3*p2 + p3)[..., np.newaxis]*t2*3 # Polynomial form
+    with named_scope("t_powers"):
+        t2 = np.power(t,2)
+        t0 = np.ones_like(t)
+    with named_scope("derivative_polynomial"):
+        out = ((-p0 + 3*p1 - 3*p2 + p3)[..., np.newaxis]*t2*3 # Polynomial form
             + (p0 - 2*p1 + p2)[..., np.newaxis]*t*6
             + (p1 -p0)[..., np.newaxis]*t0*3
             )
+    return out
 
+@scoped
 def subdivide_bezier(p0, p1, p2, p3, num_segments=2, mode = "cubic"):
     # Given start and end points of a bezier curve with control points in between, subdivides it into num_points segments.
     # Returns series of coordinates of nodes for each segment as well as the direction of the curve at that point to be used later control points.
@@ -85,6 +97,7 @@ def subdivide_bezier(p0, p1, p2, p3, num_segments=2, mode = "cubic"):
 
 
 
+@scoped
 def index_within_subgrid(val, z, w=None, offset_z = 0, offset_w = 0, mask_value = -9999):
     # for a 4D array of x,y,z,w (ie a subgrid per point in array) take the values indicated by z (in the last dimension) and w (in the second to last dimension)
     # val is therefore candidate values, and z*w indicate the correct candidate per xy point
@@ -93,21 +106,26 @@ def index_within_subgrid(val, z, w=None, offset_z = 0, offset_w = 0, mask_value 
     # When the indices are not valid (ie outside the size of val), they should be masked out with a value that is not in val (like -9999). This can then be used to mask invalid indices.
 
     # Create two placeholder arrays, values = 0:a and 0:b, to index the first two (outer) axes and allow for fancy indexing
-    index_1, index_2 = np.ogrid[:val.shape[0], :val.shape[1]]
+    with fine_scope("outer_index_grids"):
+        index_1, index_2 = np.ogrid[:val.shape[0], :val.shape[1]]
     #Project these along the later axes to match output shape
     if w is not None: # 4 dimensional case
-        index_1 = np.broadcast_to(index_1[:,:,np.newaxis, np.newaxis], z.shape)
-        index_2 = np.broadcast_to(index_2[:,:,np.newaxis, np.newaxis], z.shape)
-
-        return ( np.where( ((z >= -offset_z) & (w >= -offset_w)) & ((z < (val.shape[3]-offset_z)) & (w < (val.shape[2]-offset_w))), 
+        with fine_scope("broadcast_indices"):
+            index_1 = np.broadcast_to(index_1[:,:,np.newaxis, np.newaxis], z.shape)
+            index_2 = np.broadcast_to(index_2[:,:,np.newaxis, np.newaxis], z.shape)
+        with fine_scope("masked_gather"):
+            return ( np.where( ((z >= -offset_z) & (w >= -offset_w)) & ((z < (val.shape[3]-offset_z)) & (w < (val.shape[2]-offset_w))),
                           val[index_1, index_2, np.minimum(val.shape[2]-1, np.maximum(0,w+offset_w)),  np.minimum(val.shape[3]-1, np.maximum(0,z+offset_z))], # Needed to made indexing possible even in cases where its replaced with the mask value
                           mask_value))
-        
-    else: # 3 dimensional case
-        index_1 = np.broadcast_to(index_1[:,:,np.newaxis], z.shape)
-        index_2 = np.broadcast_to(index_2[:,:,np.newaxis], z.shape)
-        return (np.where( (z < (val.shape[2]-offset_z)) & (z >= -offset_z), val[index_1, index_2,np.minimum(val.shape[2]-1, np.maximum(0,z+offset_z))], mask_value))
 
+    else: # 3 dimensional case
+        with fine_scope("broadcast_indices"):
+            index_1 = np.broadcast_to(index_1[:,:,np.newaxis], z.shape)
+            index_2 = np.broadcast_to(index_2[:,:,np.newaxis], z.shape)
+        with fine_scope("masked_gather"):
+            return (np.where( (z < (val.shape[2]-offset_z)) & (z >= -offset_z), val[index_1, index_2,np.minimum(val.shape[2]-1, np.maximum(0,z+offset_z))], mask_value))
+
+@scoped
 def check_inner_grid(c = None):
     # For each of the inner 3*3 grid points in a 5*5 matrix, find which of its eight neighbours has the lowest value of c
     # If no value of c is provided, use distance?
@@ -145,6 +163,7 @@ def inneficient_flatten(data : np.ndarray, shape_target = None):
         data = data.reshape(*data.shape[:-2], -1)
     return data
 
+@scoped
 def closest_point_on_lines(px, py, x0, y0, x1, y1):
     """
     For each pixel (X,Y), computes all pairwise closest points between N query points and M line segments.
@@ -165,24 +184,27 @@ def closest_point_on_lines(px, py, x0, y0, x1, y1):
     """
     
     # Expand dims for broadcasting: px,py: (X,Y,N,1), x0,y0,x1,y1: (X,Y,1,M)
-    px = px[..., :, np.newaxis]
-    py = py[..., :, np.newaxis]
-    x0 = x0[..., np.newaxis, :]
-    y0 = y0[..., np.newaxis, :]
-    x1 = x1[..., np.newaxis, :]
-    y1 = y1[..., np.newaxis, :]
+    with fine_scope("expand_dims"):
+        px = px[..., :, np.newaxis]
+        py = py[..., :, np.newaxis]
+        x0 = x0[..., np.newaxis, :]
+        y0 = y0[..., np.newaxis, :]
+        x1 = x1[..., np.newaxis, :]
+        y1 = y1[..., np.newaxis, :]
 
-    dx = x1 - x0
-    dy = y1 - y0
-    dpx = px - x0
-    dpy = py - y0
+    with fine_scope("project_onto_segments"):
+        dx = x1 - x0
+        dy = y1 - y0
+        dpx = px - x0
+        dpy = py - y0
 
-    denom = dx**2 + dy**2 + 1e-12  # avoid division by zero
-    t = (dpx * dx + dpy * dy) / denom
-    t = np.clip(t, 0, 1)
+        denom = dx**2 + dy**2 + 1e-12  # avoid division by zero
+        t = (dpx * dx + dpy * dy) / denom
+        t = np.clip(t, 0, 1)
 
     return t
 
+@scoped
 def sample_pixelwise_bezier_at_t(t, p0, p1, p2, p3):
     """
     Vectorized Bézier sampler for per-pixel, per-curve, per-point t.
@@ -204,31 +226,35 @@ def sample_pixelwise_bezier_at_t(t, p0, p1, p2, p3):
         Array of shape (m, n, N, M) indicating tangents of sampled point
     """
     # Expand control points to (m, n, 1, M) for broadcasting with t (m, n, N, M)
-    p0 = p0[..., np.newaxis, :]  # (m, n, 1, M)
-    p1 = p1[..., np.newaxis, :]
-    p2 = p2[..., np.newaxis, :]
-    p3 = p3[..., np.newaxis, :]
+    with fine_scope("expand_controls"):
+        p0 = p0[..., np.newaxis, :]  # (m, n, 1, M)
+        p1 = p1[..., np.newaxis, :]
+        p2 = p2[..., np.newaxis, :]
+        p3 = p3[..., np.newaxis, :]
 
     # t is (m, n, N, M)
     one_minus_t = 1 - t
 
     # Bézier position
-    coords = (
-        one_minus_t**3 * p0 +
-        3 * one_minus_t**2 * t * p1 +
-        3 * one_minus_t * t**2 * p2 +
-        t**3 * p3
-    )
+    with fine_scope("bezier_position"):
+        coords = (
+            one_minus_t**3 * p0 +
+            3 * one_minus_t**2 * t * p1 +
+            3 * one_minus_t * t**2 * p2 +
+            t**3 * p3
+        )
 
     # Bézier tangent (derivative)
-    tangents = (
-        3 * one_minus_t**2 * (p1 - p0) +
-        6 * one_minus_t * t * (p2 - p1) +
-        3 * t**2 * (p3 - p2)
-    )
+    with fine_scope("bezier_tangent"):
+        tangents = (
+            3 * one_minus_t**2 * (p1 - p0) +
+            6 * one_minus_t * t * (p2 - p1) +
+            3 * t**2 * (p3 - p2)
+        )
 
     return coords, tangents
 
+@scoped
 def upres_bezier(x0,x1,x2,x3, upres=1):
     if upres>1: # Subsample the bezier curves before finding the nearest linear approximation within the subsampled curves
         # initial shape = X,Y,m
@@ -239,6 +265,7 @@ def upres_bezier(x0,x1,x2,x3, upres=1):
         x2 = inneficient_flatten(x2)
         x3 = inneficient_flatten(x3)
     return x0,x1,x2,x3
+@scoped
 def find_distances(x,y,x0,x1,x2,x3,y0,y1,y2,y3, upres=1, weight_t = 0.0):
     """For each pixel, find the distance to the nearest point in the corresponding bezier curves defined by x/y0-3
     """
@@ -283,6 +310,7 @@ def find_distances(x,y,x0,x1,x2,x3,y0,y1,y2,y3, upres=1, weight_t = 0.0):
     return dists
 
 
+@scoped
 def broaden_channels(dists_full, intensity, base_scale=1):
     """Broadens the near-zero regions of the input distance maps per layer.
     Result has a derivative of near 0 at low values, and approaches original values at high values.
@@ -322,6 +350,7 @@ def broaden_channels(dists_full, intensity, base_scale=1):
 
     return dists_full
 
+@scoped
 def softcap_heights(dists_full, intensity, base_scale=1):
     """Flattens the distance maps so that they asymptotically approach a maximum value at high distances.
     Function is similar to (1 - 1/(1+cx))/c, with the maximum value c equal to (100*intensity+0.1)*base_scale.
@@ -354,6 +383,7 @@ def softcap_heights(dists_full, intensity, base_scale=1):
     
     return dists_full
 
+@scoped
 def additive_mode_blending(dists_full, intensity, lacunarity=1.414, verbose=False):
     """Rescales each layer of the distance maps by a factor based on the intensity and lacunarity then adds and rescales them.
     Rescaling is an artistic choice based on experimentation in Blender, may need to be adapted later for scales other than 1 and lacunarity other than 1.414.
@@ -396,6 +426,7 @@ def additive_mode_blending(dists_full, intensity, lacunarity=1.414, verbose=Fals
 
     return dists_full
 
+@scoped
 def minimum_mode_blending(dists_full, intensity, bias_value = 0.005, verbose=False):
     """Rescales each layer of the distance maps by a factor based on the intensity and lacunarity then takes the minimum.
     Rescaling is an artistic choice based on experimentation in Blender, may need to be adapted later for scales other than 1 and lacunarity other than 1.414.
@@ -431,6 +462,7 @@ def minimum_mode_blending(dists_full, intensity, bias_value = 0.005, verbose=Fal
 
     return dists_full
 
+@scoped
 def blend_distance_layers(dists_full, intensity, lacunarity=1.414, bias_value=0.005, base_frequency=1, verbose=False):
     """Blends the distance maps using a combination of additive and minimum mode blending.
     This is an artistic choice based on experimentation in Blender, may need to be adapted later for scales other than 1 and lacunarity other than 1.414.
@@ -528,65 +560,65 @@ class smoothnoise_generator():
         # Generate a regular grid of points centered around 0. The set of offsets is the same in x and y
         #offsets = np.linspace(-0.5,0.5,n, endpoint=False) * scale*n
 
-        offsets = np.linspace(-(n-1)/2, (n-1)/2, n) # * scale
+        with named_scope("find_grid_offsets"):
+            offsets = np.linspace(-(n-1)/2, (n-1)/2, n) # * scale
 
-        # Expand x and y to shape (res, res, n, n) including added offsets of (n*n)
+            # Expand x and y to shape (res, res, n, n) including added offsets of (n*n)
 
-        offset_x, offset_y = np.meshgrid(offsets, offsets)
-        s = np.sin(rotation*2) # self.sin_lut[rotation] # 
-        c = np.cos(rotation*2) # self.cos_lut[rotation] # 
-        qx = c * offset_x - s * offset_y #rotate offsets
-        qy = s * offset_x + c * offset_y
-        offset_x = qx
-        offset_y = qy
-        
+            offset_x, offset_y = np.meshgrid(offsets, offsets)
+            s = np.sin(rotation*2) # self.sin_lut[rotation] #
+            c = np.cos(rotation*2) # self.cos_lut[rotation] #
+            qx = c * offset_x - s * offset_y #rotate offsets
+            qy = s * offset_x + c * offset_y
+            offset_x = qx
+            offset_y = qy
 
-        grid_centroids_x = np.add(x[..., np.newaxis, np.newaxis]*frequency, offset_x[np.newaxis, np.newaxis, ...])
-        grid_centroids_y = np.add(y[..., np.newaxis, np.newaxis]*frequency, offset_y[np.newaxis, np.newaxis, ...])
+            grid_centroids_x = np.add(x[..., np.newaxis, np.newaxis]*frequency, offset_x[np.newaxis, np.newaxis, ...])
+            grid_centroids_y = np.add(y[..., np.newaxis, np.newaxis]*frequency, offset_y[np.newaxis, np.newaxis, ...])
 
-        
-        # To snap the centroids on a rotated grid, we rotate the entire set in reverse, then floor+center, then rotate forwards again
-        #grid_centroids_x = grid_centroids_x*frequency
-        #grid_centroids_y = grid_centroids_y*frequency
-        qx = c * grid_centroids_x + s * grid_centroids_y # Reverse rotation
-        qy = c * grid_centroids_y - s * grid_centroids_x
-        grid_centroids_x = qx
-        grid_centroids_y = qy
-        if recenter:
-            # Constant offset of 0.5 so that points are centred within their grid spaces, in a grid proportional to the frequency
-            # TODO: check if this is necessary for dendry (not used in Voronoi)
-            grid_centroids_x = np.floor(grid_centroids_x)+0.5
-            grid_centroids_y = np.floor(grid_centroids_y)+0.5
-        else:
-            grid_centroids_x = np.floor(grid_centroids_x)
-            grid_centroids_y = np.floor(grid_centroids_y)
+        with named_scope("find_grid_snap"):
+            # To snap the centroids on a rotated grid, we rotate the entire set in reverse, then floor+center, then rotate forwards again
+            #grid_centroids_x = grid_centroids_x*frequency
+            #grid_centroids_y = grid_centroids_y*frequency
+            qx = c * grid_centroids_x + s * grid_centroids_y # Reverse rotation
+            qy = c * grid_centroids_y - s * grid_centroids_x
+            grid_centroids_x = qx
+            grid_centroids_y = qy
+            if recenter:
+                # Constant offset of 0.5 so that points are centred within their grid spaces, in a grid proportional to the frequency
+                # TODO: check if this is necessary for dendry (not used in Voronoi)
+                grid_centroids_x = np.floor(grid_centroids_x)+0.5
+                grid_centroids_y = np.floor(grid_centroids_y)+0.5
+            else:
+                grid_centroids_x = np.floor(grid_centroids_x)
+                grid_centroids_y = np.floor(grid_centroids_y)
 
-        qx = c * grid_centroids_x - s * grid_centroids_y # Forward rotation
-        qy = s * grid_centroids_x + c * grid_centroids_y
-        grid_centroids_x = qx
-        grid_centroids_y = qy
+            qx = c * grid_centroids_x - s * grid_centroids_y # Forward rotation
+            qy = s * grid_centroids_x + c * grid_centroids_y
+            grid_centroids_x = qx
+            grid_centroids_y = qy
 
+        with named_scope("find_grid_jitter"):
+            # Compute jitter based on the pattern function
+            #jitter = self.pattern(x_exp*frequency, y_exp*frequency, ndims=2) #having a grid size close to one means that cells receive the same jitter as their neighbours, as they are falling into the same bins in the pattern.
+            #Frequency upsamples that so that nearby cells are less likely to have the same jitter
 
-        # Compute jitter based on the pattern function
-        #jitter = self.pattern(x_exp*frequency, y_exp*frequency, ndims=2) #having a grid size close to one means that cells receive the same jitter as their neighbours, as they are falling into the same bins in the pattern. 
-        #Frequency upsamples that so that nearby cells are less likely to have the same jitter
-        
-        jitter = self.pattern(grid_centroids_x*scale, grid_centroids_y*scale, ndims=2) 
-        # OPTIONAL: use jitter * abs(jitter) to weight towards lower values ie the middle of each cell. This is less uniform and unused edges may be visible, but it is less likely to hit edge cases when finding eg nearest neighbours
-        grid_centroids_x = grid_centroids_x/frequency
-        grid_centroids_y = grid_centroids_y/frequency
+            jitter = self.pattern(grid_centroids_x*scale, grid_centroids_y*scale, ndims=2)
+            # OPTIONAL: use jitter * abs(jitter) to weight towards lower values ie the middle of each cell. This is less uniform and unused edges may be visible, but it is less likely to hit edge cases when finding eg nearest neighbours
+            grid_centroids_x = grid_centroids_x/frequency
+            grid_centroids_y = grid_centroids_y/frequency
 
-        # Rotate the jitter so that it is within the rotated grid squares
-        jitter_x = (c*jitter[..., 0] - s*jitter[..., 1])  * epsilon 
-        jitter_y = (s*jitter[..., 0] + c*jitter[..., 1]) * epsilon 
+            # Rotate the jitter so that it is within the rotated grid squares
+            jitter_x = (c*jitter[..., 0] - s*jitter[..., 1])  * epsilon
+            jitter_y = (s*jitter[..., 0] + c*jitter[..., 1]) * epsilon
 
-        # # Alternative: turn jitter into polar coordinates in radius epsilon to avoid hitting corners (UNTESTED)
-        # jitter_x = np.sin(jitter_x) * epsilon
-        # jitter_y = np.cos(jitter_y) * epsilon
+            # # Alternative: turn jitter into polar coordinates in radius epsilon to avoid hitting corners (UNTESTED)
+            # jitter_x = np.sin(jitter_x) * epsilon
+            # jitter_y = np.cos(jitter_y) * epsilon
 
-        grid_centroids_x = np.add(grid_centroids_x,jitter_x/frequency)
-        grid_centroids_y = np.add(grid_centroids_y,jitter_y/frequency)
-        
+            grid_centroids_x = np.add(grid_centroids_x,jitter_x/frequency)
+            grid_centroids_y = np.add(grid_centroids_y,jitter_y/frequency)
+
         return grid_centroids_x, grid_centroids_y
 
 
@@ -608,9 +640,10 @@ class smoothnoise_generator():
         skew1 = soften_start*skew
         tier_freq = base_frequency*lacunarity
         for tier in range(1,max_tier+1):
-            new_points_x, new_points_y = self.find_grid(x, y, n=3,epsilon=epsilon, frequency=tier_freq, rotation=tier, scale=1) 
-            new_points_x = inneficient_flatten(new_points_x)
-            new_points_y = inneficient_flatten(new_points_y)
+            with named_scope(f"dendry_tier_{tier}_grid"):
+                new_points_x, new_points_y = self.find_grid(x, y, n=3,epsilon=epsilon, frequency=tier_freq, rotation=tier, scale=1)
+                new_points_x = inneficient_flatten(new_points_x)
+                new_points_y = inneficient_flatten(new_points_y)
             t = closest_point_on_lines(px=new_points_x, py=new_points_y, x0=spline_start_x, y0=spline_start_y, x1=spline_end_x, y1=spline_end_y)
             # This gives an output of shape x,y,N,M, where x and y are the resolution of the image, 
             # N is the number of new points, and M is the number of curves for each pixel that have already been defined.
@@ -667,10 +700,11 @@ class smoothnoise_generator():
             new_points_x = new_points_x - tangents_x*push_upstream
             new_points_y = new_points_y - tangents_y*push_upstream
             # Distance calcs for this tier
-            dists_new= find_distances(x=x, y=y, x0=new_points_x, y0=new_points_y, 
-                                x1 = new_x1, y1=new_y1,
-                                x2=new_x25, y2=new_y25,
-                                x3=coords_x, y3=coords_y, upres=8, weight_t=weight_t)
+            with named_scope(f"dendry_tier_{tier}_distances"):
+                dists_new= find_distances(x=x, y=y, x0=new_points_x, y0=new_points_y,
+                                    x1 = new_x1, y1=new_y1,
+                                    x2=new_x25, y2=new_y25,
+                                    x3=coords_x, y3=coords_y, upres=8, weight_t=weight_t)
             dists_full = np.concatenate([dists_full, dists_new[:,:, np.newaxis]], axis = 2)
             if tier < max_tier: #update variables and combine coordinate structures for next tier
             
@@ -794,13 +828,14 @@ class smoothnoise_generator():
         spline_end_control_y = inneficient_flatten(spline_end_control_y)
         spline_end_y = inneficient_flatten(spline_end_y)
 
-        if upres>1: # Subsample the bezier curves before finding the nearest linear approximation within the subsampled curves
-            spline_start_x,spline_start_control_x,spline_end_control_x,spline_end_x = upres_bezier(x0=spline_start_x,x1 = spline_start_control_x,x2=spline_end_control_x,x3=spline_end_x, upres=upres)
-            spline_start_y,spline_start_control_y,spline_end_control_y,spline_end_y = upres_bezier(x0=spline_start_y,x1 = spline_start_control_y,x2=spline_end_control_y,x3=spline_end_y, upres=upres)
-        dists_full = find_distances(x=x, y=y, x0=spline_start_x, y0=spline_start_y, 
-                       x1 = spline_start_control_x, y1=spline_start_control_y,
-                       x2=spline_end_control_x, y2=spline_end_control_y,
-                       x3=spline_end_x, y3=spline_end_y, upres=4)
+        with named_scope("dendry_first_tier_distances"):
+            if upres>1: # Subsample the bezier curves before finding the nearest linear approximation within the subsampled curves
+                spline_start_x,spline_start_control_x,spline_end_control_x,spline_end_x = upres_bezier(x0=spline_start_x,x1 = spline_start_control_x,x2=spline_end_control_x,x3=spline_end_x, upres=upres)
+                spline_start_y,spline_start_control_y,spline_end_control_y,spline_end_y = upres_bezier(x0=spline_start_y,x1 = spline_start_control_y,x2=spline_end_control_y,x3=spline_end_y, upres=upres)
+            dists_full = find_distances(x=x, y=y, x0=spline_start_x, y0=spline_start_y,
+                           x1 = spline_start_control_x, y1=spline_start_control_y,
+                           x2=spline_end_control_x, y2=spline_end_control_y,
+                           x3=spline_end_x, y3=spline_end_y, upres=4)
         # higher tiers
         # Each curve is stored only in terms of its control points
         # Per tier (per pixel):
@@ -808,20 +843,21 @@ class smoothnoise_generator():
         #    for each of these 9 points, for each of the existing curves in the tree, find the distance from that point to the nearest point on some approximation of that curve (eg a straight line)
         #    For each of the 9 points, define a curve that goes from that point to nearest of these determined points (no longer using approximation, translated in terms of eg fraction along line)
         #    Add (the control points of) these 9 curves to the existing tree
-        dists_full = self.dendry_higher_tiers(x=x,y=y, dists_full=dists_full[..., np.newaxis], 
-                                 spline_start_x = spline_start_x,spline_start_control_x = spline_start_control_x,
-                                 spline_end_control_x = spline_end_control_x,spline_end_x = spline_end_x, 
-                                 spline_start_y = spline_start_y,spline_start_control_y = spline_start_control_y,
-                                 spline_end_control_y = spline_end_control_y,spline_end_y = spline_end_y,
-                                 base_frequency = base_frequency, 
-                                 epsilon=epsilon,
-                                 skew=skew, 
-                                 lacunarity=lacunarity, 
-                                 push_upstream=push_upstream, 
-                                 upres=upres,
-                                 push_downstream=push_downstream, 
-                                 soften_start = soften_start, scale_factor_start = scale_factor_start,
-                                 weight_t=weight_t, max_tier=dendry_layers, upres_tier_max=upres_tier_max, verbose=verbose, scale=scale)
+        with named_scope("dendry_higher_tiers"):
+            dists_full = self.dendry_higher_tiers(x=x,y=y, dists_full=dists_full[..., np.newaxis],
+                                     spline_start_x = spline_start_x,spline_start_control_x = spline_start_control_x,
+                                     spline_end_control_x = spline_end_control_x,spline_end_x = spline_end_x,
+                                     spline_start_y = spline_start_y,spline_start_control_y = spline_start_control_y,
+                                     spline_end_control_y = spline_end_control_y,spline_end_y = spline_end_y,
+                                     base_frequency = base_frequency,
+                                     epsilon=epsilon,
+                                     skew=skew,
+                                     lacunarity=lacunarity,
+                                     push_upstream=push_upstream,
+                                     upres=upres,
+                                     push_downstream=push_downstream,
+                                     soften_start = soften_start, scale_factor_start = scale_factor_start,
+                                     weight_t=weight_t, max_tier=dendry_layers, upres_tier_max=upres_tier_max, verbose=verbose, scale=scale)
         if return_full:
             return dists_full
         else:
@@ -829,82 +865,99 @@ class smoothnoise_generator():
                 intensity = np.ones_like(x)*0.5
             elif np.isscalar(intensity): #If intensity is a single value, use it for all pixels
                 intensity = np.ones_like(x)*intensity
-            blended_dists = blend_distance_layers(dists_full, intensity, lacunarity=lacunarity, bias_value=bias_value/base_frequency, base_frequency=base_frequency*blend_scale)
+            with named_scope("dendry_blend"):
+                blended_dists = blend_distance_layers(dists_full, intensity, lacunarity=lacunarity, bias_value=bias_value/base_frequency, base_frequency=base_frequency*blend_scale)
             return blended_dists
 
     def base_sample(self,x,y,**kwargs): # currently simple interpolation, not true perlin noise
-        lox = np.floor(x)
-        loy = np.floor(y)
-        a = self.pattern(lox,loy,**kwargs)
-        b = self.pattern(lox,(loy+1),**kwargs)
-        c = self.pattern((lox+1),loy,**kwargs)
-        d = self.pattern((lox+1),(loy+1),**kwargs)
-        
+        with named_scope("base_sample_lattice"):
+            with named_scope("grid_cell"):
+                lox = np.floor(x)
+                loy = np.floor(y)
+            with named_scope("corner_noise"):
+                a = self.pattern(lox,loy,**kwargs)
+                b = self.pattern(lox,(loy+1),**kwargs)
+                c = self.pattern((lox+1),loy,**kwargs)
+                d = self.pattern((lox+1),(loy+1),**kwargs)
+
         #weights = [1-x%1, x%1, 1-y%1, y%1]
         #a = a*(weights[0]*weights[2])
         #b = b*(weights[0]*weights[3])
         #c = c*(weights[1]*weights[2])
         #d = d*(weights[1]*weights[3])
-        weight1 = x%1
-        # weight1 = weight1[:,:,None]
-        weight1 = weight1 * weight1 * weight1 * (weight1 * (6 * weight1 - 15) + 10)
-        weight0 = 1-weight1
-        weight3 = y%1
-        # weight3 = weight3[:,:,None]
-        weight3 = weight3 * weight3 * weight3 * (weight3 * (6 * weight3 - 15) + 10)
-        weight2 = 1-weight3
-        
-        weight0 = np.asarray(weight0)
-        weight1 = np.asarray(weight1)
-        weight2 = np.asarray(weight2)
-        weight3 = np.asarray(weight3)
+        with named_scope("base_sample_weights"):
+            with named_scope("smoothstep_x"):
+                weight1 = x%1
+                # weight1 = weight1[:,:,None]
+                weight1 = weight1 * weight1 * weight1 * (weight1 * (6 * weight1 - 15) + 10)
+                weight0 = 1-weight1
+            with named_scope("smoothstep_y"):
+                weight3 = y%1
+                # weight3 = weight3[:,:,None]
+                weight3 = weight3 * weight3 * weight3 * (weight3 * (6 * weight3 - 15) + 10)
+                weight2 = 1-weight3
 
-        a *= weight0[..., np.newaxis]
-        a *= weight2[..., np.newaxis]
-        b *= weight0[..., np.newaxis]
-        b *= weight3[..., np.newaxis]
-        c *= weight1[..., np.newaxis]
-        c *= weight2[..., np.newaxis]
-        d *= weight1[..., np.newaxis]
-        d *= weight3[..., np.newaxis]
-        a = np.add(a,b)
-        c = np.add(c,d)
-        
-        s = np.add(a,c)
+            weight0 = np.asarray(weight0)
+            weight1 = np.asarray(weight1)
+            weight2 = np.asarray(weight2)
+            weight3 = np.asarray(weight3)
+
+        with named_scope("base_sample_interpolate"):
+            with named_scope("weight_corners"):
+                a *= weight0[..., np.newaxis]
+                a *= weight2[..., np.newaxis]
+                b *= weight0[..., np.newaxis]
+                b *= weight3[..., np.newaxis]
+                c *= weight1[..., np.newaxis]
+                c *= weight2[..., np.newaxis]
+                d *= weight1[..., np.newaxis]
+                d *= weight3[..., np.newaxis]
+            with named_scope("bilinear_sum"):
+                a = np.add(a,b)
+                c = np.add(c,d)
+                s = np.add(a,c)
         return(s)#abs(s)*s*(3-2*s))
     
     
-    def sample(self,x,y,octaves=1,neg_octaves=0, fade=0.5,voron=False,ndims=3, **kwargs) -> np.ndarray: 
-        i_range = np.arange(neg_octaves*-1, octaves)
-        base_scale = 2.0 ** i_range[0] # scale for the first octave, to avoid integers to negative powers
-        i_range_from_0 = np.arange(len(i_range))
-        ax =  x[..., np.newaxis] * np.power(2, i_range_from_0) * base_scale # np.stack([x*base_scale*2**i for i in i_range_from_0], axis=-1) #
-        ay =  y[..., np.newaxis] * np.power(2, i_range_from_0) * base_scale # np.stack([y*base_scale*2**i for i in i_range_from_0], axis=-1) #
-        c = np.cos(2*i_range) # self.cos_lut[i]
-        s = np.sin(2*i_range) # self.sin_lut[i]
-        
-        qx =   np.subtract(ax*c, ay*s)
-        qy =   np.add(ax*s, ay*c)
+    def sample(self,x,y,octaves=1,neg_octaves=0, fade=0.5,voron=False,ndims=3, **kwargs) -> np.ndarray:
+        with named_scope("sample_octave_coords"):
+            i_range = np.arange(neg_octaves*-1, octaves)
+            base_scale = 2.0 ** i_range[0] # scale for the first octave, to avoid integers to negative powers
+            i_range_from_0 = np.arange(len(i_range))
+            with named_scope("octave_scales"):
+                ax =  x[..., np.newaxis] * np.power(2, i_range_from_0) * base_scale # np.stack([x*base_scale*2**i for i in i_range_from_0], axis=-1) #
+                ay =  y[..., np.newaxis] * np.power(2, i_range_from_0) * base_scale # np.stack([y*base_scale*2**i for i in i_range_from_0], axis=-1) #
+            with named_scope("octave_rotation"):
+                c = np.cos(2*i_range) # self.cos_lut[i]
+                s = np.sin(2*i_range) # self.sin_lut[i]
+
+                qx =   np.subtract(ax*c, ay*s)
+                qy =   np.add(ax*s, ay*c)
         if voron:
-            output = self.voron(qx,qy, randomness = 0.5)
+            with named_scope("sample_voron"):
+                output = self.voron(qx,qy, randomness = 0.5)
             # Previous version of this function returned identical values for each dimension, which resulted in the same shape for voron vs base_sample
             # TODO: check if this is needed/assumed, as it is clearly redundant
-            # output = np.stack([output for _ in range(ndims)], axis=-1) 
+            # output = np.stack([output for _ in range(ndims)], axis=-1)
         else:
-            output = self.base_sample(qx,qy,ndims=ndims)
-            
-        weights = np.power(fade, i_range)
-        # for i in range(len(i_range)):
-        #     output[..., i, :] = output[..., i, :]# *weights[i]
-        if voron:
-            axis_of_iters = -2
-            output = np.stack([output[...,i]*weights[i] for i in range(len(i_range))], axis=-1)
-            output = np.stack([output for _ in range(ndims)], axis=-1) # duplicate the voron output across all dimensions, as it is a single value per pixel
-        else:
-            axis_of_iters = -2
-            output = np.stack([output[...,i, :]*weights[i] for i in range(len(i_range))], axis=-2)
-        # sample_stack = output.copy()
-        output = np.sum(output, axis=axis_of_iters)
+            with named_scope("sample_base"):
+                output = self.base_sample(qx,qy,ndims=ndims)
+
+        with named_scope("sample_octave_blend"):
+            with named_scope("octave_weights"):
+                weights = np.power(fade, i_range)
+            # for i in range(len(i_range)):
+            #     output[..., i, :] = output[..., i, :]# *weights[i]
+            with named_scope("weighted_octave_sum"):
+                if voron:
+                    axis_of_iters = -2
+                    output = np.stack([output[...,i]*weights[i] for i in range(len(i_range))], axis=-1)
+                    output = np.stack([output for _ in range(ndims)], axis=-1) # duplicate the voron output across all dimensions, as it is a single value per pixel
+                else:
+                    axis_of_iters = -2
+                    output = np.stack([output[...,i, :]*weights[i] for i in range(len(i_range))], axis=-2)
+                # sample_stack = output.copy()
+                output = np.sum(output, axis=axis_of_iters)
         return output # , weights, c, s, qx, qy, ax, ay, sample_stack
     
     def get_height(self,x,y,channel=-1, **kwargs):
@@ -927,24 +980,26 @@ class smoothnoise_generator():
                 
                 sqdist = np.minimum(sqdist, centroid)#If this centroid is closer than previous, keep this distance (always a closest neighbour search, second closest neighbour not used here
         return(np.sqrt(sqdist)[:,:,None])
-    def voron(self,x,y,randomness = 0.5): 
+    def voron(self,x,y,randomness = 0.5):
 
         # new implementation using find_grid and check_inner_grid, intended to be dimensionality agnostic
         lox = np.floor(x)
         loy = np.floor(y)
         # frac_x = x-lox
         # frac_y = y-loy
-        grid_centroids_x, grid_centroids_y = self.find_grid(lox, loy, n=5, scale=1.0, epsilon=randomness*2, frequency = 1.0, rotation = 0, recenter=False)
-        # get the coordinates of the centroids of the grid squares around each point, with some randomness to avoid regularity. 
-        # These are in absolute coordinates, not relative to the input point
-    
-        grid_centroids_x = grid_centroids_x - x[..., np.newaxis, np.newaxis] # coordinates of centroids relative to the input point
-        grid_centroids_y = grid_centroids_y - y[..., np.newaxis, np.newaxis]
-        grid_centroids_x = np.power(grid_centroids_x, 2)
-        grid_centroids_y = np.power(grid_centroids_y, 2)
-        sqdist = np.add(grid_centroids_x, grid_centroids_y)
-        sqdist = np.min(sqdist, axis=-1)
-        sqdist = np.min(sqdist, axis=-1) # minimum distance to any centroid in the per-pixel grid
+        with named_scope("voron_grid"):
+            grid_centroids_x, grid_centroids_y = self.find_grid(lox, loy, n=5, scale=1.0, epsilon=randomness*2, frequency = 1.0, rotation = 0, recenter=False)
+            # get the coordinates of the centroids of the grid squares around each point, with some randomness to avoid regularity.
+            # These are in absolute coordinates, not relative to the input point
+
+        with named_scope("voron_nearest_distance"):
+            grid_centroids_x = grid_centroids_x - x[..., np.newaxis, np.newaxis] # coordinates of centroids relative to the input point
+            grid_centroids_y = grid_centroids_y - y[..., np.newaxis, np.newaxis]
+            grid_centroids_x = np.power(grid_centroids_x, 2)
+            grid_centroids_y = np.power(grid_centroids_y, 2)
+            sqdist = np.add(grid_centroids_x, grid_centroids_y)
+            sqdist = np.min(sqdist, axis=-1)
+            sqdist = np.min(sqdist, axis=-1) # minimum distance to any centroid in the per-pixel grid
         return np.sqrt(sqdist)# return the distance to the nearest centroid, as a simple voronoi function
     
     

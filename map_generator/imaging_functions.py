@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Optional
 
 import map_generator.backend_switch as np
+from map_generator.backend_switch import scoped
 import cv2
 import matplotlib.pyplot as plt
 
@@ -108,6 +109,7 @@ def check_layer(sample_slice, layer1=-1, layer2=-1):
 
 def to_numpy(arr):
     return arr.get() if hasattr(arr, "get") else arr
+@scoped
 def flatten_negative(z: np.ndarray, threshold=0, weight=1.0) -> np.ndarray:
     """Reduces the impact of negative values in the array.
     At a weight of 1.0, all values below the threshold are set to 0."""

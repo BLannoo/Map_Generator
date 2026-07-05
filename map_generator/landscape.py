@@ -1,4 +1,5 @@
 import map_generator.backend_switch as np
+from map_generator.backend_switch import named_scope, scoped, suppress_fine_scopes
 from map_generator.noise_functions import my_perl, blend_distance_layers
 import random
 import math
@@ -43,6 +44,7 @@ class landscape_gen():
         self.slopes_y = np.multiply(np.sin(np.asarray(slopes_theta)), np.asarray(slopes_r))
         self.river_density = 20
 
+    @scoped
     def compute_offsets(self, x, y,offs = 1, fine_offs =1,neg_octave=4, **kwargs): #consider using a different function for fine_offset
         
         # neg_octave = int(np.log2(self.lin_sca)-4) # 4 works for 200km, each doubling above this doubles the range
@@ -58,6 +60,7 @@ class landscape_gen():
         coarse_x = x+offset[:,:,0]
         coarse_y = y+offset[:,:,1]
         return(coarse_x, coarse_y, fine_x, fine_y)
+    @scoped
     def get_rivers(self,x,y,weight=1, lacunarity=1.414, **kwargs):
         freq = self.river_density/self.lin_sca #Frequency of major rivers, 20 across the world (nb not necessarily 20 separate rivers, but 20 points at which they're defined)
         river_z = my_perl.dendry(x=x,y=y, intensity=weight, dendry_layers=5, upres=2, final_sample=10, 
@@ -69,6 +72,7 @@ class landscape_gen():
                                  scale = freq, blend_scale = 1,return_full=True,
                                  include_secondary=False, **kwargs)
         return(river_z)
+    @scoped
     def get_base_height(self, x,y, include_secondary=True,distance_cap = 8,slope_intensity=1, **kwargs):
         ### Updated for higher dimensional inputs
         # tested with 2 and 4D inputs, theoretically should handle any ndims, but best to test broadcasting first for new applications
@@ -82,54 +86,56 @@ class landscape_gen():
         n_plates = len(self.centroids)
         shape_with_plates = input_shape + (n_plates,)
         #noise_height = offset[2] #Necessary? May cause tiling depending on noise
-        diff_x = np.subtract(x[..., np.newaxis], self.centroids[:, 0]) #Distance from each point to each plate
-        diff_y = np.subtract(y[..., np.newaxis], self.centroids[:, 1]) #Distance from each point to each plate
-        
-        
+        with named_scope("plate_offsets"):
+            diff_x = np.subtract(x[..., np.newaxis], self.centroids[:, 0]) #Distance from each point to each plate
+            diff_y = np.subtract(y[..., np.newaxis], self.centroids[:, 1]) #Distance from each point to each plate
+
         # calculate slope height contribution based on this linear distance
-        base_height = np.multiply(diff_x, self.slopes_x[np.newaxis, ...])  
-        # hardcoding of all additional dimensions is seemingly not possible while maintaining flexibility without for loop or braching eg if statements
-        # instead one new axis is added to enforce broadcasting
-        base_height += np.multiply(diff_y, self.slopes_y[np.newaxis, ...])
+        with named_scope("slope_contribution"):
+            base_height = np.multiply(diff_x, self.slopes_x[np.newaxis, ...])
+            # hardcoding of all additional dimensions is seemingly not possible while maintaining flexibility without for loop or braching eg if statements
+            # instead one new axis is added to enforce broadcasting
+            base_height += np.multiply(diff_y, self.slopes_y[np.newaxis, ...])
+            base_height *= slope_intensity/self.lin_sca #Scale the slope height contribution such that it would vary by a total of slope_intensity across the world
 
-        base_height *= slope_intensity/self.lin_sca #Scale the slope height contribution such that it would vary by a total of slope_intensity across the world
-        diff_x = np.power(diff_x, 2) #Square the distance to each plate
-        diff_y = np.power(diff_y, 2) #Square the distance to each plate
-
-        distances = np.sqrt(np.add(diff_x, diff_y)) #Calculate the distance to each plate
-
-        #plate_num = np.argmin(distances, axis = -1)
-        # #Distance to closest plate
-        plate_dist = np.min(distances, axis = -1) # shape agnostic version
-        # assert plate_dist.shape == input_shape, "Plate distance shape does not match input shape"
-        
-        distances = np.subtract(distances, plate_dist[...,np.newaxis]) #How much further a plate is than the closest plate
+        # distance from each point to each tectonic plate centroid, minus the nearest
+        with named_scope("plate_distances"):
+            diff_x = np.power(diff_x, 2) #Square the distance to each plate
+            diff_y = np.power(diff_y, 2) #Square the distance to each plate
+            distances = np.sqrt(np.add(diff_x, diff_y)) #Calculate the distance to each plate
+            plate_dist = np.min(distances, axis = -1) # shape agnostic version
+            distances = np.subtract(distances, plate_dist[...,np.newaxis]) #How much further a plate is than the closest plate
         assert distances.shape == shape_with_plates, "Distances shape does not match expected shape with plates"
-        if include_secondary: #Functionally use twice the distance for this
-            distances_2 = np.minimum(distances, 2*self.lin_sca/distance_cap) * 0.5*distance_cap/self.lin_sca
-            distances_2 = np.clip(1 - distances_2,0,1)
-            distances_2 = 3*distances_2**2 - 2*distances_2**3
-        distances = np.minimum(distances, self.lin_sca/distance_cap) * distance_cap/self.lin_sca #Cap the distance at 10%? of the world size, ranging from 0 to 1
-        
-        distances = np.clip(1 - distances,0,1) #Weightings of each plate, this is effectively a blurring as you move away and causes primary ridges
-        distances = 3*distances**2 - 2*distances**3 #smoothstep
-        assert distances.shape == shape_with_plates, "Distances shape does not match expected shape with plates after processing"
-        base_height += np.asarray(self.heights)[np.newaxis, :]
-        base_height += np.multiply(distances, base_height) # multiplying in a separate step so that the slope contribution is also scaled
-        base_height = np.sum(base_height, axis = -1)
-        base_height = base_height - np.sum(np.asarray(self.heights)) #For an unknown reason, there seems to be global influence of all plates, therefore this correction is needed
-        # TODO: identify why this global influence occurs and whether it can be mitigated in a more principled way
 
-        
+        # per-plate weighting via a smoothstep falloff (causes primary ridges)
+        with named_scope("plate_weights"):
+            if include_secondary: #Functionally use twice the distance for this
+                distances_2 = np.minimum(distances, 2*self.lin_sca/distance_cap) * 0.5*distance_cap/self.lin_sca
+                distances_2 = np.clip(1 - distances_2,0,1)
+                distances_2 = 3*distances_2**2 - 2*distances_2**3
+            distances = np.minimum(distances, self.lin_sca/distance_cap) * distance_cap/self.lin_sca #Cap the distance at 10%? of the world size, ranging from 0 to 1
+            distances = np.clip(1 - distances,0,1) #Weightings of each plate, this is effectively a blurring as you move away and causes primary ridges
+            distances = 3*distances**2 - 2*distances**3 #smoothstep
+        assert distances.shape == shape_with_plates, "Distances shape does not match expected shape with plates after processing"
+
+        with named_scope("combine_plate_heights"):
+            base_height += np.asarray(self.heights)[np.newaxis, :]
+            base_height += np.multiply(distances, base_height) # multiplying in a separate step so that the slope contribution is also scaled
+            base_height = np.sum(base_height, axis = -1)
+            base_height = base_height - np.sum(np.asarray(self.heights)) #For an unknown reason, there seems to be global influence of all plates, therefore this correction is needed
+            # TODO: identify why this global influence occurs and whether it can be mitigated in a more principled way
+
         # This point in the process gives a very old, eroded landscape, similar to canyons or the Blue Mountains
         if include_secondary:
             #Secondary shape should result in a curve that dips negative, making negative plates cause a ridge on neighbours, mimicking subduction
-            distances = np.multiply(distances_2, np.cos(distances_2*1.5*math.pi)) #Current secondary curve method, can be replaced.
-            distances = np.sum(np.multiply(distances, np.asarray(self.heights)[np.newaxis, :]), axis = -1)
+            with named_scope("secondary_ridges"):
+                distances = np.multiply(distances_2, np.cos(distances_2*1.5*math.pi)) #Current secondary curve method, can be replaced.
+                distances = np.sum(np.multiply(distances, np.asarray(self.heights)[np.newaxis, :]), axis = -1)
             return(base_height, distances)
         else:
             return base_height
     
+    @scoped
     def get_mountain_heights(self, x,y,weight, bias = -0.175, **kwargs):
         #output = 0.125*distances#tbd, importance of the boundary itself, to generally change elevation rather than just mountain creation
         
@@ -170,7 +176,8 @@ class landscape_gen():
         # del coarse_x, coarse_y
         # gc.collect()
         if mountainsca > 0:
-            mountains = self.get_mountain_heights(fine_x, fine_y, np.clip(base*0.5-0.25, 0,1),**kwargs)*200*mountainsca/(self.lin_sca)
+            with named_scope("scale_mountains"):
+                mountains = self.get_mountain_heights(fine_x, fine_y, np.clip(base*0.5-0.25, 0,1),**kwargs)*200*mountainsca/(self.lin_sca)
             # del fine_x, fine_y
             # gc.collect()
             # layered = self.layerise(x,y,base+mountains, weight=0)
@@ -180,17 +187,20 @@ class landscape_gen():
         if riversca > 0:
             freq = self.river_density/self.lin_sca
             lacunarity = 1.618
-            rivers_full = self.get_rivers(coarse_x*rivernoise+x*(1-rivernoise),coarse_y*rivernoise+y*(1-rivernoise),weight = np.clip((base+secondary+mountains)*0.85, 0, 1), lacunarity=lacunarity, ** kwargs)*freq*0.1
-            river_z = blend_distance_layers(rivers_full, intensity = np.clip((base+secondary)*0.85, 0, 1), 
-                                            lacunarity=lacunarity, bias_value=0.0025,base_frequency=6*np.sqrt(freq))*freq*riversca*2
-            river_z = np.power(river_z, 0.5)
-            # river_map = 1 - blend_distance_layers(rivers_full, intensity = np.clip(np.abs(layered*0.5), 0, 1), 
+            with named_scope("scale_rivers"), suppress_fine_scopes():
+                rivers_full = self.get_rivers(coarse_x*rivernoise+x*(1-rivernoise),coarse_y*rivernoise+y*(1-rivernoise),weight = np.clip((base+secondary+mountains)*0.85, 0, 1), lacunarity=lacunarity, ** kwargs)*freq*0.1
+                river_z = blend_distance_layers(rivers_full, intensity = np.clip((base+secondary)*0.85, 0, 1),
+                                                lacunarity=lacunarity, bias_value=0.0025,base_frequency=6*np.sqrt(freq))*freq*riversca*2
+                river_z = np.power(river_z, 0.5)
+            # river_map = 1 - blend_distance_layers(rivers_full, intensity = np.clip(np.abs(layered*0.5), 0, 1),
             #                                 lacunarity=lacunarity, bias_value=0.0,base_frequency=3*np.sqrt(freq))
         else:
             rivers_full = np.zeros((x.shape[0], x.shape[1], 1))
             river_z = np.zeros_like(base)
             river_map = np.zeros_like(base)
-        
-        base_0 = flatten_negative(base, threshold=0.0, weight=0.9)
-        river_0 = np.multiply(river_z, base_0)
-        return (base, mountains , base_0+river_0+mountains+secondary*0.4, river_z, secondary)
+
+        with named_scope("combine_layers"):
+            base_0 = flatten_negative(base, threshold=0.0, weight=0.9)
+            river_0 = np.multiply(river_z, base_0)
+            combined = base_0+river_0+mountains+secondary*0.4
+        return (base, mountains , combined, river_z, secondary)
